@@ -1,0 +1,284 @@
+--[[ 
+Lightning Wizard:
+This is a code for a lightning wizard that shoots lightning beams at you from the sky if he can see you, 
+attacks melee if you are in melee range, follows you if it can't see you or you are out of his range, and 
+pummels the ground with lightning when he dies. Fastcast and SimplePath modules were used for this wizard.
+--]]
+
+-- services
+local Players = game:GetService("Players")
+local rep = game:GetService("ReplicatedStorage")
+local Debris = game:GetService("Debris")
+local CollectionService = game:GetService("CollectionService")
+--defining the npc parts
+local Enemy = script.Parent
+local Humanoid = Enemy.Humanoid
+
+--modules
+local SimplePath = require(rep.Dependencies.SimplePath)
+local fastcast = require(rep.Dependencies.FastCastRedux)
+
+--animations 
+local runAnimTrack = Humanoid:LoadAnimation(Enemy.Animate.run.RunAnim)
+local lightningAnimTrack = Humanoid:LoadAnimation(Enemy.CastSpellAnim)
+local swingAnimTrack = Humanoid:LoadAnimation(Enemy.SwingAnim)
+
+--configurations for the raycast that is used to check if there is anything the between npc and player
+local params = RaycastParams.new()
+params.FilterType = Enum.RaycastFilterType.Exclude
+params.FilterDescendantsInstances = {script.Parent}
+
+--configurations for the ground lightning beam that is shot to the lightning location
+local GroundCaster = fastcast.new()
+local behavior = fastcast.newBehavior()
+local paramsCaster = RaycastParams.new()
+paramsCaster.FilterType = Enum.RaycastFilterType.Include
+behavior.RaycastParams = paramsCaster
+behavior.CosmeticBulletContainer = workspace.Projectiles
+behavior.MaxDistance = 300
+
+-- defining staff locations
+local spellCrystal = Enemy.MagicStaff.RedCrystal
+local staff = Enemy.MagicStaff.Handle
+
+
+local Path = SimplePath.new(Enemy)
+
+local EndDestination = nil -- this will be the player when it is found
+local meleeAttacking = false -- variable to see if the staff should damage the players it touches
+-- configuration
+local WalkSpeed = 16
+local spellRange = 200
+local spellDamage = 30
+local meleeRange = 7
+local meleeDamage = 10
+local rangedAttackSpeed = 1
+local meleeAttackSpeed = 1
+local GroundSpeed = 200 --speed of the ground lightning projectile
+local randomFactor = 0.06 -- how much the lightnings will deviate from the target
+local groundLevel = 0 --the y level where lightning warning will show up 
+local skyBeamDelay = 1 --how long it takes for the beam to touch the ground
+local skyBeamSpeed = 400
+local explosionRadius = 10
+local deathLightnings = 5
+Humanoid.WalkSpeed = WalkSpeed
+-- defining instances 
+local instances = rep.Instances
+local LightningWarning = instances.LightningWarning
+LightningWarning.Size = Vector3.new(explosionRadius * 2, 0.01, explosionRadius * 2)
+local LightningBeamSky = instances.LightningBeamSky
+local LightningBeamGround = instances.LightningBeamGround
+behavior.CosmeticBulletTemplate = LightningBeamGround
+local LightningExplosion = instances.LightningExplosion
+--codes for moving the ground lightning beam with fastcast
+GroundCaster.LengthChanged:Connect(function(casterThatFired, lastPoint, rayDir, displacement, segmentVelocity, cosmeticBulletObject)
+	local newpos = lastPoint + (rayDir * displacement)
+	cosmeticBulletObject.Position = newpos
+end)
+GroundCaster.CastTerminating:Connect(function(cast)
+	local cosmeticBullet = cast.RayInfo.CosmeticBulletObject
+	if cosmeticBullet ~= nil then
+		cosmeticBullet:Destroy()
+	end
+end)
+
+-- function for bringing lightning down to a given position
+local function lightningDown(pos)
+	local lightningBeamSky = LightningBeamSky:Clone()
+	lightningBeamSky.Parent = workspace.Projectiles
+	lightningBeamSky.Position = pos + Vector3.new(0, skyBeamDelay * skyBeamSpeed, 0) 
+	
+	for i = 1, skyBeamSpeed * skyBeamDelay + 100 do
+		-- Touched event doesn't fire when we move it with code so we use this GetPartsInPart instead
+		local touchingParts = game:GetService("Workspace"):GetPartsInPart(lightningBeamSky)
+		
+		if touchingParts[1] then -- when it touches something this will trigger and it will explode
+			
+			local explosionClone = LightningExplosion:Clone()
+			explosionClone.Parent = workspace.Projectiles
+			explosionClone.Position = lightningBeamSky.Position - Vector3.new(0, lightningBeamSky.Size.X / 2,0)  --this gives us the lower tip of the beam
+			lightningBeamSky:Destroy()
+			
+			local hitCharacters = {} -- a table where we store hit characters so that we don't damage them more than once
+			explosionClone.Touched:Connect(function(hit)
+				-- check if the part it touches has a model ancestor, has humanoid, non enemy and hasn't been hit before
+				if hit:FindFirstAncestorWhichIsA("Model") then
+					local model = hit:FindFirstAncestorWhichIsA("Model")
+					if model:FindFirstChild("Humanoid") and not CollectionService:HasTag(model, "Enemy")  and not table.find(hitCharacters, model) then
+						local Humanoid = model.Humanoid
+						Humanoid:TakeDamage(spellDamage)
+						hitCharacters[#hitCharacters + 1] = model
+					end
+				end
+			end)
+			--making the explosion grow
+			for i = 1,20 do
+				task.wait()
+				explosionClone.Size += Vector3.new(explosionRadius , explosionRadius, explosionRadius) / 10
+			end
+			explosionClone:Destroy()
+			break -- break the for loop so it doesn't keep going
+		end
+		-- when we increase size it increases both ways so we need to make the lightning beam go down half as much so it looks like it is only growing downwards
+		lightningBeamSky.Size += Vector3.new(skyBeamSpeed / 60  ,0,0) 
+		lightningBeamSky.Position += Vector3.new(0,- skyBeamSpeed / 120,0)
+		task.wait()
+	end
+end
+-- function for showing a lightningWarning then making the lightning fall on it
+local function lightningWarning(pos)
+	local warningClone = LightningWarning:Clone()
+	warningClone.Parent = workspace.Projectiles
+	warningClone.Position = pos
+	Debris:AddItem(warningClone,skyBeamDelay)
+	lightningDown(pos)
+end
+-- function for defining where to call lightning and shooting the ground lightning for it
+local function CastLightning(player, IsGroundLightning)
+	local playerLocation = player.HumanoidRootPart.Position
+	local pos = Vector3.new(playerLocation.x + math.random(-100, 100) * randomFactor, groundLevel , playerLocation.z + math.random(-100, 100) * randomFactor)
+	local distance = pos - spellCrystal.Position -- taking the distance between the spell crystal and position where he calls lightning as vector 3
+	
+	if IsGroundLightning then -- we don't want those ground beams if this is cast from the death of the wizard
+		GroundCaster:Fire(spellCrystal.Position, distance, GroundSpeed, behavior) -- shooting a ground beam towards the lightning place from the wizard's spell crystal
+	end
+	-- we don't want this to yield the code so we use task.delay instead of task.wiat
+	task.delay(distance.Magnitude / GroundSpeed,lightningWarning, pos)
+end
+staff.Touched:Connect(function(hit)
+	-- damage the first non enemy character while melee attacking
+	if meleeAttacking then 
+		local model = hit:FindFirstAncestorWhichIsA("Model")
+		if model  then
+			if model:FindFirstChild("Humanoid") and not CollectionService:HasTag(model, "Enemy") then
+				model.Humanoid:TakeDamage(meleeDamage)
+				meleeAttacking = false
+			end
+		end
+	end
+	
+end)
+--function to fin the closest player
+local function FindClosestPlayer()
+	
+	local closestNum = math.huge
+	local closestCharacter = nil
+	
+	for i,player in pairs(Players:GetPlayers()) do --iterating through all players
+		
+		--pass if they don't have a character for some reason
+		local character = player.Character
+		if not character  then
+			continue
+		end
+		--pass if they don't have a humanoid for some reason
+		local Humanoid = character:FindFirstChild("Humanoid")
+		if not Humanoid then
+			continue
+		end
+		--pass if they are dead
+		if Humanoid.Health <= 0 then
+			continue
+		end
+		
+		local HumanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+		
+		if HumanoidRootPart then
+			--find their distance
+			local distanceVec = HumanoidRootPart.Position - Enemy.HumanoidRootPart.Position
+			local distance = distanceVec.Magnitude
+			--record their distance as closestNum if it is smaller than the current closestNum, and record them as closestCharacter
+			if distance < closestNum then
+				closestNum = distance
+				closestCharacter = character
+			end 
+		end
+		
+	end
+	return closestCharacter 
+end
+local function act(AttackType) --the argument is to define if the action is spell or melee
+	if EndDestination then --EndDestination will be set later
+		Humanoid.WalkSpeed = 0 
+		runAnimTrack:Stop()
+		local lookAt = Vector3.new(EndDestination.Position.X, Enemy.HumanoidRootPart.Position.Y, EndDestination.Position.Z) 
+		Enemy.HumanoidRootPart.CFrame = CFrame.new(Enemy.HumanoidRootPart.Position, lookAt)
+
+		if AttackType == "ranged" then
+			lightningAnimTrack:Play()
+			lightningAnimTrack:AdjustSpeed((rangedAttackSpeed)) 
+			task.wait(0.5 / rangedAttackSpeed) -- waiting a bit for casting because that is the part he readies the spell
+			CastLightning(EndDestination.Parent, true)
+			if lightningAnimTrack.IsPlaying then
+				lightningAnimTrack.Ended:Wait()
+			end
+			task.wait(0.4 /rangedAttackSpeed)
+
+		elseif AttackType == "melee" then
+			swingAnimTrack:Play()
+			swingAnimTrack:AdjustSpeed((meleeAttackSpeed)) 
+			task.wait(0.1 / meleeAttackSpeed) -- waiting a bit for damaging because that is the part he readies the attack
+			meleeAttacking = true
+			if swingAnimTrack.IsPlaying then
+				swingAnimTrack.Ended:Wait()
+			end
+			meleeAttacking = false
+			task.wait(0.67 / meleeAttackSpeed)
+		else
+			warn("Unknown action")
+		end
+		Humanoid.WalkSpeed = WalkSpeed
+	end
+	
+end
+Humanoid.Died:Connect(function()
+	
+	Humanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
+	Enemy.Parent = workspace.Dead
+	--Pummel the ground with several lightnings when dying, with more randomness
+	randomFactor = 0.1
+	for i = 1,deathLightnings do
+		task.wait(0.1)
+		CastLightning(Enemy, false)
+	end
+	
+	task.wait(3)
+	script.Parent:Destroy()
+end)
+
+while task.wait() do
+	
+	if Humanoid.Health > 0  then
+		
+		if FindClosestPlayer() then -- if it can find the closest player
+			
+			EndDestination = FindClosestPlayer().HumanoidRootPart --setting the end destination 
+			--setting the raycast from the wizard to the player
+			local direction = EndDestination.Position - Enemy.HumanoidRootPart.Position
+			local raycastResult = workspace:Raycast(Enemy.Head.Position, direction, params)
+			if raycastResult then
+				-- if the raycast instance is not the player or the player is out of range, walk towards the player
+				if not raycastResult.Instance:IsDescendantOf(EndDestination.Parent) or direction.Magnitude >= spellRange  then
+					if not runAnimTrack.IsPlaying then
+						runAnimTrack:Play()
+					end
+					
+					Path:Run(EndDestination)
+				-- if the raycast instance is the player, cast lightning if not in melee range and attack melee if in melee range
+				else
+					if direction.Magnitude >= meleeRange then
+						act("ranged")
+					else
+						act("melee")
+					end
+				end
+			end
+		else
+			runAnimTrack:Stop() -- If it finds no one it shouldn't play run animation
+		end
+	end
+end
+
+
+
+
